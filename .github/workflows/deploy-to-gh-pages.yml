@@ -13,11 +13,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch event to site-gen-repo
+        env:
+          # Pass the token via env (not interpolated into the run: script directly).
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
         run: |
-          curl -X POST https://api.github.com/repos/wamp-proto/wamp-site-gen/dispatches \
-          -H 'Accept: application/vnd.github.everest-preview+json' \
-          -H 'Authorization: token ${{ secrets.ACCESS_TOKEN }}' \
-          --data '{"event_type": "publish", "client_payload": { "repository": "'"$GITHUB_REPOSITORY"'", "commit_sha": "'"$GITHUB_SHA"'" }}'
+          set -euo pipefail
+          # POST a repository_dispatch to wamp-site-gen to trigger a site rebuild+deploy.
+          # The dispatches endpoint returns 204 No Content on success. Assert that
+          # explicitly: without this check a curl against an expired/revoked token
+          # returns 401/403 but still exits 0, so the job would go GREEN while the
+          # dispatch is silently dropped (this hid a ~8-month publish outage; see #570).
+          http_status=$(curl -sS -X POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: token ${ACCESS_TOKEN}" \
+            -o /tmp/dispatch_resp.txt -w '%{http_code}' \
+            https://api.github.com/repos/wamp-proto/wamp-site-gen/dispatches \
+            --data "{\"event_type\": \"publish\", \"client_payload\": { \"repository\": \"${GITHUB_REPOSITORY}\", \"commit_sha\": \"${GITHUB_SHA}\" }}")
+          echo "repository_dispatch HTTP status: ${http_status}"
+          cat /tmp/dispatch_resp.txt || true
+          if [ "${http_status}" != "204" ]; then
+            echo "::error::repository_dispatch to wamp-proto/wamp-site-gen failed (HTTP ${http_status}). Check the ACCESS_TOKEN secret: expired / revoked / insufficient scope (needs Contents: read+write on wamp-site-gen)."
+            exit 1
+          fi
+          echo "Dispatch delivered OK (204)."
   deploy-to-gh-pages:
     name: Deploy spec site to github pages
     runs-on: ubuntu-latest
